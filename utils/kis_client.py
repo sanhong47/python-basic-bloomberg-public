@@ -30,6 +30,9 @@ PRICE_ENDPOINT = "/uapi/domestic-stock/v1/quotations/inquire-price"
 PRICE_TR_ID = "FHKST01010100"
 DAILY_CHART_ENDPOINT = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 DAILY_CHART_TR_ID = "FHKST03010100"
+ORDER_CASH_ENDPOINT = "/uapi/domestic-stock/v1/trading/order-cash"
+BALANCE_ENDPOINT = "/uapi/domestic-stock/v1/trading/inquire-balance"
+DAILY_ORDER_ENDPOINT = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
 KIS_MARKET_CODE = "J"
 
 _TOKEN_CACHE: dict[str, dict[str, Any]] = {}
@@ -290,6 +293,66 @@ def _request_kis_json(
     raise RuntimeError("KIS API 요청이 반복적으로 제한되었습니다. 잠시 후 다시 시도하세요.")
 
 
+def _request_kis_post_json(
+    *,
+    endpoint: str,
+    tr_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if requests is None:
+        raise RuntimeError("requests 패키지가 없어 KIS API를 호출할 수 없습니다.")
+
+    env_name = _env_name()
+    app_key = os.getenv("KIS_APP_KEY", "").strip()
+    app_secret = os.getenv("KIS_APP_SECRET", "").strip()
+    access_token = _get_access_token()
+
+    _throttle_requests()
+    response = requests.post(
+        f"{_base_url(env_name)}{endpoint}",
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {access_token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+        },
+        json=payload,
+        timeout=15,
+    )
+    data = _safe_json(response)
+    if response.ok and data.get("rt_cd") in (None, "", "0"):
+        return data
+
+    message = data.get("msg1") or data.get("message") or response.text
+    raise RuntimeError(f"KIS API 요청 실패: {message}")
+
+
+def _require_account_configuration() -> tuple[str, str, str]:
+    missing = _missing_env()
+    if requests is None:
+        raise RuntimeError("requests 패키지가 없어 KIS 계좌를 조회할 수 없습니다.")
+    if missing:
+        raise RuntimeError(
+            "KIS 계좌 조회 설정이 없습니다. 누락된 환경 변수: "
+            + ", ".join(missing)
+        )
+    return (
+        os.getenv("KIS_ACCOUNT_NO", "").strip(),
+        os.getenv("KIS_ACCOUNT_PRODUCT_CODE", "").strip(),
+        _env_name(),
+    )
+
+
+def _as_records(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    return []
+
+
 def _format_as_of(output: dict[str, Any]) -> str:
     trade_date = str(output.get("stck_bsop_date") or "").strip()
     trade_time = str(output.get("stck_cntg_hour") or "").strip()
@@ -394,34 +457,148 @@ def get_price_history(symbol: str, start_date: date, end_date: date) -> list[dic
             }
         )
 
-    if not records:
-        raise RuntimeError("기간 시세 응답이 비어 있습니다.")
     return records
 
 
 def get_balance_snapshot() -> dict[str, Any]:
+    account_no, product_code, env_name = _require_account_configuration()
+    tr_id = "TTTC8434R" if env_name == "real" else "VTTC8434R"
+    data = _request_kis_json(
+        endpoint=BALANCE_ENDPOINT,
+        tr_id=tr_id,
+        params={
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        },
+    )
+    summary_rows = _as_records(data.get("output2"))
+    summary = summary_rows[0] if summary_rows else {}
+    holdings = [
+        {
+            "symbol": str(row.get("pdno") or ""),
+            "name": str(row.get("prdt_name") or ""),
+            "quantity": _to_int(row.get("hldg_qty")),
+            "average_price": _to_float(row.get("pchs_avg_pric")),
+            "current_price": _to_float(row.get("prpr")),
+            "evaluation_amount": _to_float(row.get("evlu_amt")),
+            "profit_loss": _to_float(row.get("evlu_pfls_amt")),
+            "profit_loss_pct": _to_float(row.get("evlu_pfls_rt")),
+        }
+        for row in _as_records(data.get("output1"))
+    ]
     return {
         "summary": {
-            "cash": 10000000,
-            "evaluation_amount": 0,
-            "profit_loss": 0,
+            "cash": _to_float(summary.get("dnca_tot_amt")),
+            "evaluation_amount": _to_float(summary.get("tot_evlu_amt")),
+            "profit_loss": _to_float(summary.get("evlu_pfls_smtl_amt")),
         },
-        "holdings": [],
-        "source": "sample-placeholder",
+        "holdings": holdings,
+        "source": f"kis-openapi-{env_name}",
     }
 
 
+def _get_orders(ccld_dvsn: str) -> list[dict[str, Any]]:
+    account_no, product_code, env_name = _require_account_configuration()
+    tr_id = "TTTC0081R" if env_name == "real" else "VTTC0081R"
+    end_date = date.today()
+    start_date = end_date - timedelta(days=30)
+    data = _request_kis_json(
+        endpoint=DAILY_ORDER_ENDPOINT,
+        tr_id=tr_id,
+        params={
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "INQR_STRT_DT": start_date.strftime("%Y%m%d"),
+            "INQR_END_DT": end_date.strftime("%Y%m%d"),
+            "SLL_BUY_DVSN_CD": "00",
+            "PDNO": "",
+            "CCLD_DVSN": ccld_dvsn,
+            "INQR_DVSN": "00",
+            "INQR_DVSN_3": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": "",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        },
+    )
+    return _as_records(data.get("output1"))
+
+
 def get_order_history() -> list[dict[str, Any]]:
-    return []
+    return _get_orders("00")
 
 
 def get_open_orders() -> list[dict[str, Any]]:
-    return []
+    return _get_orders("02")
 
 
 def submit_paper_order(order_payload: dict[str, Any]) -> dict[str, Any]:
+    if order_payload.get("account_mode") != "demo":
+        raise ValueError("실전 주문은 지원하지 않습니다. 모의투자 모드만 주문할 수 있습니다.")
+    if _env_name() != "demo":
+        raise RuntimeError(
+            "KIS_ENV가 demo가 아닙니다. 실전 API 보호를 위해 주문을 차단했습니다."
+        )
+    account_no, product_code, _ = _require_account_configuration()
+    if _force_sample_data():
+        raise RuntimeError(
+            "KIS_FORCE_SAMPLE이 설정되어 있어 실제 모의 주문 요청을 차단했습니다."
+        )
+
+    symbol = str(order_payload.get("symbol") or "").strip()
+    side = str(order_payload.get("side") or "")
+    order_type = str(order_payload.get("order_type") or "")
+    qty = _to_int(order_payload.get("qty"), -1)
+    price = _to_int(order_payload.get("price"), -1)
+    if not symbol:
+        raise ValueError("종목코드를 입력해 주세요.")
+    if side not in {"buy", "sell"}:
+        raise ValueError("주문 구분은 buy 또는 sell이어야 합니다.")
+    if order_type not in {"market", "limit"}:
+        raise ValueError("주문 유형은 market 또는 limit이어야 합니다.")
+    if qty <= 0:
+        raise ValueError("주문 수량은 1 이상이어야 합니다.")
+    if order_type == "limit" and price <= 0:
+        raise ValueError("지정가 주문 가격은 1원 이상이어야 합니다.")
+
+    tr_id = "VTTC0012U" if side == "buy" else "VTTC0011U"
+    response = _request_kis_post_json(
+        endpoint=ORDER_CASH_ENDPOINT,
+        tr_id=tr_id,
+        payload={
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "PDNO": symbol,
+            "ORD_DVSN": "01" if order_type == "market" else "00",
+            "ORD_QTY": str(qty),
+            "ORD_UNPR": "0" if order_type == "market" else str(price),
+            "EXCG_ID_DVSN_CD": "KRX",
+            "SLL_TYPE": "01" if side == "sell" else "",
+            "CNDT_PRIC": "",
+        },
+    )
+    result = response.get("output") or {}
     return {
-        "ok": False,
-        "message": "스켈레톤 단계에서는 실제 주문을 보내지 않습니다. 10-8장에서 주문 요청과 결과 확인 연결.",
-        "request": order_payload,
+        "ok": True,
+        "message": str(response.get("msg1") or "모의 주문이 접수되었습니다."),
+        "order_no": str(result.get("ODNO") or result.get("odno") or ""),
+        "order_time": str(result.get("ORD_TMD") or result.get("ord_tmd") or ""),
+        "request": {
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "qty": qty,
+            "price": price,
+            "account_mode": "demo",
+        },
     }

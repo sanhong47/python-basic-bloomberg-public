@@ -43,9 +43,9 @@ python-basic-bloomberg-public/
 - `pages/1_종목_분석실.py`: 메인 분석 화면
 - `pages/2_주문_보유현황.py`: 주문 상태, 미체결, 보유현황 화면
 - `utils/analysis.py`: 시세 정리, 지표 계산, 주문 미리보기 요약
-- `utils/kis_client.py`: KIS 연동 placeholder
-- `utils/ai_assistant.py`: OpenAI 연동 placeholder
-- `utils/news_client.py`: RSS 뉴스 placeholder
+- `utils/kis_client.py`: KIS 시세·계좌 조회 및 모의 주문 연동
+- `utils/ai_assistant.py`: OpenAI Copilot·뉴스 브리핑 연동
+- `utils/news_client.py`: RSS 뉴스 수집
 - `utils/storage.py`: Streamlit session state 초기화
 
 ## 실행 방법
@@ -106,13 +106,13 @@ streamlit run app.py
 
 현재 레포는 학습용 뼈대이므로 아래 기능은 아직 완성되어 있지 않습니다.
 
-- KIS 실시간 현재가/시세 실연동
-- AI Copilot 실제 호출
-- RSS 뉴스 실수집
-- 주문 요청 실제 연결
-- 주문 상태, 미체결, 보유현황 실제 조회
+- 실전 주문 요청
 
-즉, 화면 구조와 함수 자리는 준비되어 있지만 실제 내용은 책 10장을 따라가며 채우게 됩니다.
+KIS 시세·계좌 조회, AI Copilot, RSS 뉴스, 모의투자 주문 요청은 설정이 있을 때 연결됩니다.
+주문/보유현황 화면은 최근 주문, 미체결 주문, 보유 종목, 예수금을 KIS에서 조회합니다.
+
+모의 주문은 `주문하기`를 누르면 한국투자증권 모의투자 계좌에 요청됩니다.
+실전 주문은 지원하지 않으며 `KIS_ENV=real`일 때 주문 요청이 차단됩니다.
 
 ## 주의사항
 

@@ -16,6 +16,7 @@ DEFAULT_SESSION_STATE = {
     "news_briefing": None,
     "order_draft": None,
     "order_result": None,
+    "order_preview": None,
     "order_ticket_account_mode": "demo",
     "order_ticket_symbol": "005930",
     "order_ticket_side": "buy",
